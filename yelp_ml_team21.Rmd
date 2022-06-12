@@ -1,0 +1,163 @@
+---
+title: "yelp_EDA"
+author: "Chenlin"
+date: "2022/4/13"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+rm(list = ls())
+set.seed(4)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(reshape2)
+#install.packages('xgboost')
+library(xgboost)
+library(caret)
+```
+
+##### Loading Dataset #####
+```{r pressure, echo=FALSE}
+yelp <- read.csv('/Users/chenl/Desktop/Machine Learning/Final Project/yelp_data.csv', header = TRUE, stringsAsFactors = TRUE)
+trainIndex = sample(1:nrow(yelp), size = nrow(yelp)*0.8)
+train.x <- yelp[trainIndex, ]
+test.x <- yelp[-trainIndex, ]
+train.y <- yelp$review_stars[trainIndex]
+test.y <- yelp$review_stars[-trainIndex]
+```
+
+###### EDA #####
+```{r}
+# dimension of dataset
+dim(yelp) # 215879 * 26
+
+# checking missing values
+na.count <- function(v){sum(is.na(v))}
+apply(yelp, 2, na.count)
+```
+
+```{r}
+# distribution of review stars
+p1 <- ggplot(yelp, aes(x=review_stars))+
+    geom_bar(stat="bin", bins= 9, fill="#56a0a8") + 
+    geom_text(stat='count', aes(label=..count..), vjust=1.6, color="white") +
+    ggtitle("Customer Review Star Counts") +
+    xlab("Stars") + ylab("Count") +
+    theme_minimal()
+
+# distribution of business stars
+p2 <-ggplot(yelp, aes(x=business_stars))+
+    geom_bar(stat="bin", bins= 9, fill="#56a0a8") + 
+    geom_text(stat='count', aes(label=..count..), vjust=1.6, color="white") +
+    ggtitle("Business Star Counts") +
+    xlab("Stars") + ylab("Count") +
+    theme_minimal()
+
+p3 <- yelp %>% ggplot(aes(x=review_count)) + geom_histogram(bins=50) + scale_x_log10() +
+              ggtitle('Review Counts')
+              
+p1;p2;p3
+```
+
+```{r}
+yelp %>%
+  select(-review_stars) %>%
+  melt() %>%
+  ggplot(aes(value,fill = categories.9))+
+  facet_wrap(~variable,scales="free",nrow=4)+
+  geom_density(alpha = 0.25)+
+  theme_minimal()+
+  labs(fill="Business Categories")+
+  ggtitle("Distribution of Varaibles By Business Category")
+```
+## Boxplots by Review Star
+```{r}
+ggplot(data = yelp, mapping = aes(x = categories.8, y = review_stars)) +
+  geom_boxplot()
+```
+## Correlation heatmap of numeric variables
+```{r}
+sub_yelp <- yelp[,-c(1, 9, 18, 19, 20, 24)]
+sub_yelp <- sub_yelp[, c(7,8,16,19, 20)]
+cor.matrix<-cor(sub_yelp, method = "spearman") 
+cor.matrix_melt<-melt(cor.matrix)
+ggplot(cor.matrix_melt,aes(x=Var1,y=Var2,fill=value))+
+  geom_tile()+
+  scale_fill_gradient(low = "rosybrown2",high="royalblue4")+
+  ggtitle("Correlation Heatmap of all numeric variables")+
+  theme(axis.text.x = element_text(angle = 45,hjust = 1),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank())
+cor(sub_yelp, yelp[,21], method = "spearman")
+```
+
+```{r}
+yelp %>%
+  group_by(city) %>%
+  summarise(Count = n()) %>%
+  arrange(desc(Count)) %>%
+  ungroup() %>%
+  mutate(City = reorder(city,Count)) %>%
+  head(10) %>%
+  
+  ggplot(aes(x = City,y = Count)) +
+  geom_bar(stat='identity',colour="white", fill = 'rosybrown2') +
+  geom_text(aes(x = City, y = 1, label = paste0("(",round(Count/1e3)," K )",sep="")),
+            hjust=0, vjust=.5, size = 4, colour = 'black',
+            fontface = 'bold') +
+  labs(x = 'City', y = 'Count of Reviews', 
+       title = 'Top Ten Cities with the most Business parties in Yelp') +
+  coord_flip() + 
+  theme_bw()
+```
+
+### Q-Q plot ### 
+```{r}
+par(mfrow = c(2, 2))
+for (v in colnames(sub_yelp)[c(1, 2, 4, 5)]) {
+  model = aov(as.formula(paste(c(v, "review_stars"), collapse = "~")), data = sub_yelp)
+  qqnorm(resid(model), main = v)
+}
+```
+As we can see from the plot, almost all the residuals of numeric variables do not obey normal distribution. We should use non-parametric method.
+
+### XGBoost Model ###
+```{r}
+# define predictor and response variables in training set
+train.x = data.matrix(train.x[, -21])
+train.y = train.y
+
+# define predictor and response variables in testing set
+test.x = data.matrix(test.x[, -21])
+test.y = test.y
+
+#define final training and testing sets
+xgb_train = xgb.DMatrix(data = train.x, label = train.y)
+xgb_test = xgb.DMatrix(data = test.x, label = test.y)
+
+#define watchlist
+watchlist = list(train=xgb_train, test=xgb_test)
+
+#fit XGBoost model and display training and testing data at each round
+model = xgb.train(data = xgb_train, max.depth = 3, watchlist=watchlist, nrounds = 70)
+```
+
+```{r}
+#define final model
+final = xgboost(data = xgb_train, max.depth = 3, nrounds = 69, verbose = 0)
+```
+
+### Fit the model ### 
+```{r}
+pred_y <- predict(final, newdata = test.x)
+
+mean((test.y - pred_y)^2) #mse
+caret::MAE(test.y, pred_y) #mae
+caret::RMSE(test.y, pred_y) #rmse
+```
